@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>accomplished.org</title>
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: #0a0a0f;
+    font-family: 'Courier New', monospace;
+  }
+
+  #bg {
+    position: fixed; inset: 0;
+    background:
+      radial-gradient(ellipse 80% 60% at 50% 40%, rgba(20,40,60,0.6) 0%, transparent 70%),
+      #0a0a0f;
+  }
+
+  /* Grid lines */
+  #bg::before {
+    content: '';
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(rgba(40,80,120,0.06) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(40,80,120,0.06) 1px, transparent 1px);
+    background-size: 60px 60px;
+  }
+
+  #three-canvas {
+    position: fixed; inset: 0;
+    cursor: grab;
+  }
+  #three-canvas:active { cursor: grabbing; }
+
+  #trail-canvas {
+    position: fixed; inset: 0;
+    pointer-events: none;
+  }
+
+  #wordmark {
+    position: fixed;
+    top: 2rem;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 11px;
+    letter-spacing: 0.35em;
+    color: rgba(140,200,255,0.35);
+    text-transform: uppercase;
+    pointer-events: none;
+    user-select: none;
+    white-space: nowrap;
+  }
+
+  #hint {
+    position: fixed;
+    bottom: 2rem;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 10px;
+    letter-spacing: 0.25em;
+    color: rgba(140,200,255,0.2);
+    pointer-events: none;
+    user-select: none;
+    transition: opacity 2s ease;
+    white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+
+<div id="bg"></div>
+<canvas id="three-canvas"></canvas>
+<canvas id="trail-canvas"></canvas>
+<div id="wordmark">accomplished.org</div>
+<div id="hint">drag to rotate &nbsp;·&nbsp; move to leave a mark</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(() => {
+
+  // ─── THREE.JS SHED ───────────────────────────────────────────────────────
+
+  const canvas3 = document.getElementById('three-canvas');
+  const renderer = new THREE.WebGLRenderer({ canvas: canvas3, antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setClearColor(0x000000, 0);
+
+  const scene  = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+  camera.position.set(0, 1.2, 5.5);
+  camera.lookAt(0, 0.5, 0);
+
+  const wireMat = new THREE.LineBasicMaterial({
+    color: 0x4ab3ff,
+    transparent: true,
+    opacity: 0.75
+  });
+
+  const dimMat = new THREE.LineBasicMaterial({
+    color: 0x1a4a7a,
+    transparent: true,
+    opacity: 0.4
+  });
+
+  function edgesFromGeom(geom, mat) {
+    const edges = new THREE.EdgesGeometry(geom);
+    return new THREE.LineSegments(edges, mat);
+  }
+
+  const shedGroup = new THREE.Group();
+
+  // Main body — typical UK shed: wider than tall, low pitch roof
+  // Dimensions: 2.4m wide, 1.8m tall walls, 2.0m deep
+  const W = 2.4, WH = 1.8, D = 2.0;
+
+  // Walls box
+  const bodyGeo = new THREE.BoxGeometry(W, WH, D);
+  const bodyMesh = edgesFromGeom(bodyGeo, wireMat);
+  bodyMesh.position.y = WH / 2;
+  shedGroup.add(bodyMesh);
+
+  // Roof — pitched, ridge along the length (Z axis)
+  // Ridge sits 0.55 above wall tops, centred
+  const roofH = 0.55;
+  const ridgeY = WH + roofH;
+
+  function roofLines() {
+    const g = new THREE.Group();
+    const pts = (arr) => {
+      const geo = new THREE.BufferGeometry().setFromPoints(arr.map(([x,y,z]) => new THREE.Vector3(x,y,z)));
+      return new THREE.Line(geo, wireMat);
+    };
+
+    const hW = W / 2, hD = D / 2;
+    const ridgeX = 0;
+
+    // Front gable triangle
+    g.add(pts([[-hW, WH, hD],[ridgeX, ridgeY, hD],[hW, WH, hD]]));
+    // Back gable triangle
+    g.add(pts([[-hW, WH, -hD],[ridgeX, ridgeY, -hD],[hW, WH, -hD]]));
+    // Ridge line
+    g.add(pts([[ridgeX, ridgeY, -hD],[ridgeX, ridgeY, hD]]));
+    // Left slope edges
+    g.add(pts([[-hW, WH, -hD],[-hW, WH, hD]]));
+    // Right slope edges
+    g.add(pts([[hW, WH, -hD],[hW, WH, hD]]));
+    // Left slope eave to ridge (front+back already done in gables, add mid if wide)
+    // Roof panel lines — a few horizontal battens on each slope
+    const battens = 3;
+    for (let i = 1; i <= battens; i++) {
+      const t = i / (battens + 1);
+      const bx = -hW + t * hW; // left slope
+      const by = WH + t * roofH;
+      g.add(pts([[bx, by, -hD],[bx, by, hD]]));
+      const bx2 = hW - t * hW; // right slope (mirror)
+      g.add(pts([[bx2, by, -hD],[bx2, by, hD]]));
+    }
+
+    return g;
+  }
+  shedGroup.add(roofLines());
+
+  // Door — classic UK shed double door on front face, slightly off-centre
+  function doorLines() {
+    const g = new THREE.Group();
+    const pts = (arr) => {
+      const geo = new THREE.BufferGeometry().setFromPoints(arr.map(([x,y,z]) => new THREE.Vector3(x,y,z)));
+      return new THREE.Line(geo, wireMat);
+    };
+    const z = D / 2 + 0.001;
+    const dw = 0.7, dh = 1.55, dx = -0.1;
+    // Outer door frame
+    g.add(pts([[dx - dw/2, 0, z],[dx - dw/2, dh, z],[dx + dw/2, dh, z],[dx + dw/2, 0, z]]));
+    // Centre split
+    g.add(pts([[dx, 0, z],[dx, dh, z]]));
+    // Cross braces on each door panel
+    g.add(pts([[dx - dw/2, 0, z],[dx, dh * 0.55, z]]));
+    g.add(pts([[dx, 0, z],[dx - dw/2, dh * 0.55, z]]));
+    g.add(pts([[dx, 0, z],[dx + dw/2, dh * 0.55, z]]));
+    g.add(pts([[dx + dw/2, 0, z],[dx, dh * 0.55, z]]));
+    return g;
+  }
+  shedGroup.add(doorLines());
+
+  // Window — small single pane, right of door, front face
+  function windowLines() {
+    const g = new THREE.Group();
+    const pts = (arr) => {
+      const geo = new THREE.BufferGeometry().setFromPoints(arr.map(([x,y,z]) => new THREE.Vector3(x,y,z)));
+      return new THREE.Line(geo, wireMat);
+    };
+    const z = D / 2 + 0.001;
+    const wx = 0.45, wy = 0.9, ww = 0.5, wh = 0.45;
+    g.add(pts([[wx, wy, z],[wx + ww, wy, z],[wx + ww, wy + wh, z],[wx, wy + wh, z],[wx, wy, z]]));
+    // Cross pane
+    g.add(pts([[wx + ww/2, wy, z],[wx + ww/2, wy + wh, z]]));
+    g.add(pts([[wx, wy + wh/2, z],[wx + ww, wy + wh/2, z]]));
+    return g;
+  }
+  shedGroup.add(windowLines());
+
+  // Side window (right face)
+  function sideWindowLines() {
+    const g = new THREE.Group();
+    const pts = (arr) => {
+      const geo = new THREE.BufferGeometry().setFromPoints(arr.map(([x,y,z]) => new THREE.Vector3(x,y,z)));
+      return new THREE.Line(geo, dimMat);
+    };
+    const x = W / 2 + 0.001;
+    const wy = 0.85, wz = 0.2, ww = 0.5, wh = 0.4;
+    g.add(pts([[x, wy, wz],[x, wy + wh, wz],[x, wy + wh, wz + ww],[x, wy, wz + ww],[x, wy, wz]]));
+    g.add(pts([[x, wy + wh/2, wz],[x, wy + wh/2, wz + ww]]));
+    return g;
+  }
+  shedGroup.add(sideWindowLines());
+
+  // Felt strips on roof (horizontal lines across slope)
+  function feltLines() {
+    const g = new THREE.Group();
+    const pts = (arr) => {
+      const geo = new THREE.BufferGeometry().setFromPoints(arr.map(([x,y,z]) => new THREE.Vector3(x,y,z)));
+      return new THREE.Line(geo, dimMat);
+    };
+    const hD = D / 2, hW = W / 2, ridgeX = 0;
+    const strips = 5;
+    for (let i = 1; i <= strips; i++) {
+      const t = i / (strips + 1);
+      // Left slope: x goes from -hW to 0, y from WH to ridgeY
+      const lx = -hW + t * hW;
+      const ly = WH + t * roofH;
+      g.add(pts([[lx, ly, -hD],[lx, ly, hD]]));
+      // Right slope mirror
+      const rx = hW - t * hW;
+      const ry = WH + t * roofH;
+      g.add(pts([[rx, ry, -hD],[rx, ry, hD]]));
+    }
+    return g;
+  }
+  shedGroup.add(feltLines());
+
+  // Vertical cladding lines on walls
+  function claddingLines() {
+    const g = new THREE.Group();
+    const pts = (arr) => {
+      const geo = new THREE.BufferGeometry().setFromPoints(arr.map(([x,y,z]) => new THREE.Vector3(x,y,z)));
+      return new THREE.Line(geo, dimMat);
+    };
+    const hW = W/2, hD = D/2, spacing = 0.3;
+    // Front and back
+    for (let x = -hW + spacing; x < hW; x += spacing) {
+      pts([[x,0,hD],[x,WH,hD]]); // skip door area roughly
+      if (Math.abs(x + 0.1) > 0.5) g.add(pts([[x, 0, hD],[x, WH, hD]]));
+      g.add(pts([[x, 0, -hD],[x, WH, -hD]]));
+    }
+    // Sides
+    for (let z = -hD + spacing; z < hD; z += spacing) {
+      g.add(pts([[hW, 0, z],[hW, WH, z]]));
+      g.add(pts([[-hW, 0, z],[-hW, WH, z]]));
+    }
+    return g;
+  }
+  shedGroup.add(claddingLines());
+
+  // Floor/ground plane — simple outline
+  {
+    const pts = [[-W/2,0,-D/2],[W/2,0,-D/2],[W/2,0,D/2],[-W/2,0,D/2],[-W/2,0,-D/2]];
+    const geo = new THREE.BufferGeometry().setFromPoints(pts.map(([x,y,z]) => new THREE.Vector3(x,y,z)));
+    shedGroup.add(new THREE.Line(geo, dimMat));
+  }
+
+  shedGroup.position.y = -0.6;
+  scene.add(shedGroup);
+
+  // Faint ambient glow point
+  const light = new THREE.PointLight(0x4ab3ff, 0.4, 20);
+  light.position.set(3, 4, 3);
+  scene.add(light);
+
+  // ─── DRAG ROTATION ───────────────────────────────────────────────────────
+
+  let isDragging = false;
+  let lastMX = 0, lastMY = 0;
+  let rotY = 0.4, rotX = -0.12;
+  let velY = 0.003, velX = 0;
+  let touchId = null;
+
+  canvas3.addEventListener('mousedown', e => {
+    isDragging = true;
+    lastMX = e.clientX; lastMY = e.clientY;
+    velY = 0; velX = 0;
+  });
+  window.addEventListener('mousemove', e => {
+    if (!isDragging) return;
+    const dx = e.clientX - lastMX;
+    const dy = e.clientY - lastMY;
+    velY = dx * 0.008;
+    velX = dy * 0.005;
+    rotY += velY; rotX += velX;
+    rotX = Math.max(-0.5, Math.min(0.5, rotX));
+    lastMX = e.clientX; lastMY = e.clientY;
+  });
+  window.addEventListener('mouseup', () => { isDragging = false; });
+
+  canvas3.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) {
+      isDragging = true;
+      touchId = e.touches[0].identifier;
+      lastMX = e.touches[0].clientX;
+      lastMY = e.touches[0].clientY;
+      velY = 0; velX = 0;
+    }
+  }, { passive: true });
+  window.addEventListener('touchmove', e => {
+    if (!isDragging) return;
+    for (const t of e.touches) {
+      if (t.identifier === touchId) {
+        const dx = t.clientX - lastMX;
+        const dy = t.clientY - lastMY;
+        velY = dx * 0.008;
+        velX = dy * 0.005;
+        rotY += velY; rotX += velX;
+        rotX = Math.max(-0.5, Math.min(0.5, rotX));
+        lastMX = t.clientX; lastMY = t.clientY;
+      }
+    }
+  }, { passive: true });
+  window.addEventListener('touchend', e => {
+    isDragging = false;
+  });
+
+  // ─── RESIZE ───────────────────────────────────────────────────────────────
+
+  function resize3() {
+    const w = window.innerWidth, h = window.innerHeight;
+    renderer.setSize(w, h);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  }
+
+  // ─── TRAIL CANVAS ─────────────────────────────────────────────────────────
+
+  const trailCanvas = document.getElementById('trail-canvas');
+  const tCtx = trailCanvas.getContext('2d');
+  let TW, TH;
+
+  function resizeTrail() {
+    TW = trailCanvas.width  = window.innerWidth;
+    TH = trailCanvas.height = window.innerHeight;
+  }
+
+  const GEAR_COLOR = [
+    [255, 200, 60],
+    [200, 220, 255],
+    [180, 255, 180],
+    [255, 140, 80],
+    [200, 160, 255],
+  ];
+
+  const trailItems = [];
+
+  // Draw a gear/cog shape
+  function drawGear(ctx, x, y, outerR, teeth, angle, alpha, lineW, color) {
+    const innerR = outerR * 0.65;
+    const holeR  = outerR * 0.22;
+    const [r,g,b] = color;
+
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+    ctx.strokeStyle = `rgba(${r},${g},${b},${alpha})`;
+    ctx.lineWidth = lineW;
+
+    // Teeth
+    ctx.beginPath();
+    for (let i = 0; i < teeth; i++) {
+      const a0 = (i / teeth) * Math.PI * 2;
+      const a1 = ((i + 0.35) / teeth) * Math.PI * 2;
+      const a2 = ((i + 0.65) / teeth) * Math.PI * 2;
+      const a3 = ((i + 1.0)  / teeth) * Math.PI * 2;
+      if (i === 0) ctx.moveTo(Math.cos(a0) * innerR, Math.sin(a0) * innerR);
+      else ctx.lineTo(Math.cos(a0) * innerR, Math.sin(a0) * innerR);
+      ctx.lineTo(Math.cos(a1) * outerR, Math.sin(a1) * outerR);
+      ctx.lineTo(Math.cos(a2) * outerR, Math.sin(a2) * outerR);
+      ctx.lineTo(Math.cos(a3) * innerR, Math.sin(a3) * innerR);
+    }
+    ctx.closePath();
+    ctx.stroke();
+
+    // Inner circle
+    ctx.beginPath();
+    ctx.arc(0, 0, innerR * 0.7, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Hub hole
+    ctx.beginPath();
+    ctx.arc(0, 0, holeR, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Spokes
+    const spokes = Math.max(3, Math.floor(teeth / 3));
+    for (let i = 0; i < spokes; i++) {
+      const a = (i / spokes) * Math.PI * 2;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a) * holeR * 1.4, Math.sin(a) * holeR * 1.4);
+      ctx.lineTo(Math.cos(a) * innerR * 0.65, Math.sin(a) * innerR * 0.65);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+
+  // Draw a wrench/spanner
+  function drawWrench(ctx, x, y, size, angle, alpha, color) {
+    const [r,g,b] = color;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+    ctx.strokeStyle = `rgba(${r},${g},${b},${alpha})`;
+    ctx.lineWidth = size * 0.1;
+    ctx.lineCap = 'round';
+
+    // Handle
+    ctx.beginPath();
+    ctx.moveTo(0, size * 0.25);
+    ctx.lineTo(0, size);
+    ctx.stroke();
+
+    // Head circle (open end wrench approximation)
+    ctx.beginPath();
+    ctx.arc(0, 0, size * 0.28, 0.4, Math.PI * 2 - 0.4);
+    ctx.stroke();
+
+    // Small circle at bottom
+    ctx.beginPath();
+    ctx.arc(0, size * 0.85, size * 0.12, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  // Draw a bolt/hex nut
+  function drawNut(ctx, x, y, r, angle, alpha, color) {
+    const [rv,g,b] = color;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+    ctx.strokeStyle = `rgba(${rv},${g},${b},${alpha})`;
+    ctx.lineWidth = r * 0.12;
+
+    ctx.beginPath();
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2 - Math.PI / 6;
+      if (i === 0) ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+      else ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+    }
+    ctx.closePath();
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 0.42, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  // Draw a spring coil
+  function drawSpring(ctx, x, y, w, h, angle, alpha, color) {
+    const [r,g,b] = color;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+    ctx.strokeStyle = `rgba(${r},${g},${b},${alpha})`;
+    ctx.lineWidth = w * 0.08;
+    ctx.lineCap = 'round';
+
+    const coils = 4;
+    ctx.beginPath();
+    ctx.moveTo(0, -h/2);
+    for (let i = 0; i <= coils * 20; i++) {
+      const t  = i / (coils * 20);
+      const cx = Math.sin(t * coils * Math.PI * 2) * w * 0.5;
+      const cy = -h/2 + t * h;
+      if (i === 0) ctx.moveTo(cx, cy);
+      else ctx.lineTo(cx, cy);
+    }
+    ctx.stroke();
+
+    // End caps
+    ctx.beginPath();
+    ctx.moveTo(-w*0.3, -h/2); ctx.lineTo(w*0.3, -h/2);
+    ctx.moveTo(-w*0.3,  h/2); ctx.lineTo(w*0.3,  h/2);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  const SHAPES = ['gear', 'gear', 'gear', 'nut', 'wrench', 'spring'];
+
+  function spawnItem(x, y, vx, vy) {
+    const shape = SHAPES[Math.floor(Math.random() * SHAPES.length)];
+    const color = GEAR_COLOR[Math.floor(Math.random() * GEAR_COLOR.length)];
+    const size  = Math.random() * 18 + 8;
+    trailItems.push({
+      x, y,
+      vx: vx * (Math.random() * 0.3 + 0.05) + (Math.random() - 0.5) * 1.5,
+      vy: vy * (Math.random() * 0.3 + 0.05) + (Math.random() - 0.5) * 1.5,
+      size,
+      angle: Math.random() * Math.PI * 2,
+      spin: (Math.random() - 0.5) * 0.08,
+      life: 1,
+      decay: Math.random() * 0.012 + 0.008,
+      shape,
+      color,
+      teeth: Math.floor(Math.random() * 6) + 7
+    });
+  }
+
+  let lastPX = null, lastPY = null, lastPT = 0;
+  let isTouch = false;
+
+  function onPointer(x, y, touch) {
+    isTouch = touch;
+    const now = performance.now();
+    if (lastPX !== null) {
+      const dt   = Math.max(now - lastPT, 1);
+      const vx   = (x - lastPX) / dt * 5;
+      const vy   = (y - lastPY) / dt * 5;
+      const dist = Math.hypot(x - lastPX, y - lastPY);
+      const n    = Math.floor(dist / (touch ? 20 : 30)) + 1;
+      for (let i = 0; i < n; i++) {
+        const t = i / n;
+        spawnItem(
+          lastPX + (x - lastPX) * t,
+          lastPY + (y - lastPY) * t,
+          vx, vy
+        );
+      }
+    }
+    lastPX = x; lastPY = y; lastPT = now;
+  }
+
+  window.addEventListener('mousemove', e => onPointer(e.clientX, e.clientY, false));
+  window.addEventListener('touchmove', e => {
+    for (const t of e.changedTouches) onPointer(t.clientX, t.clientY, true);
+  }, { passive: true });
+  window.addEventListener('touchstart', e => {
+    for (const t of e.changedTouches) { lastPX = t.clientX; lastPY = t.clientY; lastPT = performance.now(); }
+  }, { passive: true });
+
+  // ─── DEVICE TILT (background only) ───────────────────────────────────────
+
+  let tiltX = 0, tiltY = 0, rawTX = 0, rawTY = 0;
+  let baseGamma = null, baseBeta = null, calibBuf = [], gotMotion = false;
+
+  function handleOrientation(e) {
+    const gamma = e.gamma, beta = e.beta;
+    if (gamma === null || beta === null) return;
+    if (baseGamma === null) {
+      calibBuf.push({ gamma, beta });
+      if (calibBuf.length < 8) return;
+      baseGamma = calibBuf.reduce((s,r) => s + r.gamma, 0) / calibBuf.length;
+      baseBeta  = calibBuf.reduce((s,r) => s + r.beta,  0) / calibBuf.length;
+      calibBuf  = [];
+    }
+    rawTX += (Math.max(-1, Math.min(1, (gamma - baseGamma) / 40)) - rawTX) * 0.12;
+    rawTY += (Math.max(-1, Math.min(1, (beta  - baseBeta)  / 40)) - rawTY) * 0.12;
+    gotMotion = true;
+  }
+
+  let gotAbs = false;
+  window.addEventListener('deviceorientationabsolute', e => { gotAbs = true; handleOrientation(e); }, { passive: true });
+  setTimeout(() => { if (!gotAbs) window.addEventListener('deviceorientation', handleOrientation, { passive: true }); }, 600);
+
+  window.addEventListener('mousemove', e => {
+    if (gotMotion) return;
+    rawTX += ((e.clientX / window.innerWidth  - 0.5) * 2 - rawTX) * 0.08;
+    rawTY += ((e.clientY / window.innerHeight - 0.5) * 2 - rawTY) * 0.08;
+  });
+
+  // ─── MAIN LOOP ────────────────────────────────────────────────────────────
+
+  function loop() {
+    requestAnimationFrame(loop);
+
+    // Smooth tilt for background
+    tiltX += (rawTX - tiltX) * 0.04;
+    tiltY += (rawTY - tiltY) * 0.04;
+
+    // Subtle camera sway from tilt (separate from drag rotation)
+    camera.position.x = tiltX * 0.4;
+    camera.position.y = 1.2 - tiltY * 0.3;
+    camera.lookAt(0, 0.5, 0);
+
+    // Shed rotation — inertia + slow auto-spin
+    if (!isDragging) {
+      velY *= 0.97;
+      velX *= 0.97;
+      if (Math.abs(velY) < 0.0005) velY = 0.003; // resume slow spin
+    }
+    rotY += velY;
+    rotX += velX;
+    rotX = Math.max(-0.5, Math.min(0.5, rotX));
+
+    shedGroup.rotation.y = rotY;
+    shedGroup.rotation.x = rotX;
+
+    renderer.render(scene, camera);
+
+    // Trail canvas
+    tCtx.clearRect(0, 0, TW, TH);
+
+    for (let i = trailItems.length - 1; i >= 0; i--) {
+      const p = trailItems[i];
+      p.x     += p.vx;
+      p.y     += p.vy;
+      p.vy    += 0.04; // gravity
+      p.vx    *= 0.98;
+      p.vy    *= 0.98;
+      p.angle += p.spin;
+      p.life  -= p.decay;
+
+      if (p.life <= 0) { trailItems.splice(i, 1); continue; }
+
+      const a = p.life * p.life; // fade out faster at end
+
+      if (p.shape === 'gear') {
+        drawGear(tCtx, p.x, p.y, p.size, p.teeth, p.angle, a * 0.9, 1.2, p.color);
+      } else if (p.shape === 'wrench') {
+        drawWrench(tCtx, p.x, p.y, p.size * 1.6, p.angle, a * 0.85, p.color);
+      } else if (p.shape === 'nut') {
+        drawNut(tCtx, p.x, p.y, p.size * 0.7, p.angle, a * 0.9, p.color);
+      } else if (p.shape === 'spring') {
+        drawSpring(tCtx, p.x, p.y, p.size * 0.6, p.size * 1.2, p.angle, a * 0.8, p.color);
+      }
+    }
+  }
+
+  function onResize() {
+    resize3();
+    resizeTrail();
+  }
+
+  window.addEventListener('resize', onResize);
+  onResize();
+
+  document.getElementById('hint').style.transition = 'opacity 2s ease';
+  setTimeout(() => { document.getElementById('hint').style.opacity = '0'; }, 4000);
+
+  loop();
+})();
+</script>
+</body>
+</html>
