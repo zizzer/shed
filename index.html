@@ -42,20 +42,6 @@
     pointer-events: none;
   }
 
-  #wordmark {
-    position: fixed;
-    top: 2rem;
-    left: 50%;
-    transform: translateX(-50%);
-    font-size: 11px;
-    letter-spacing: 0.35em;
-    color: rgba(140,200,255,0.35);
-    text-transform: uppercase;
-    pointer-events: none;
-    user-select: none;
-    white-space: nowrap;
-  }
-
   #hint {
     position: fixed;
     bottom: 2rem;
@@ -76,7 +62,6 @@
 <div id="bg"></div>
 <canvas id="three-canvas"></canvas>
 <canvas id="trail-canvas"></canvas>
-<div id="wordmark">accomplished.org</div>
 <div id="hint">drag to rotate &nbsp;·&nbsp; move to leave a mark</div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -321,17 +306,23 @@
       if (t.identifier === touchId) {
         const dx = t.clientX - lastMX;
         const dy = t.clientY - lastMY;
-        velY = dx * 0.008;
-        velX = dy * 0.005;
-        rotY += velY; rotX += velX;
-        rotX = Math.max(-0.5, Math.min(0.5, rotX));
+        // On mobile with tilt active, drag fine-tunes the orbit
+        if (gotMotion) {
+          tiltAzOffset   += dx * 0.004;
+          tiltElevOffset -= dy * 0.003;
+          targetAz   = 0.4 + tiltAzOffset;
+          targetElev = Math.max(ELEV_MIN, Math.min(ELEV_MAX, 0.22 + tiltElevOffset));
+        } else {
+          velY = dx * 0.008;
+          velX = dy * 0.005;
+          rotY += velY; rotX += velX;
+          rotX = Math.max(-0.5, Math.min(0.5, rotX));
+        }
         lastMX = t.clientX; lastMY = t.clientY;
       }
     }
   }, { passive: true });
-  window.addEventListener('touchend', e => {
-    isDragging = false;
-  });
+  window.addEventListener('touchend', () => { isDragging = false; });
 
   // ─── RESIZE ───────────────────────────────────────────────────────────────
 
@@ -552,23 +543,64 @@
     for (const t of e.changedTouches) { lastPX = t.clientX; lastPY = t.clientY; lastPT = performance.now(); }
   }, { passive: true });
 
-  // ─── DEVICE TILT (background only) ───────────────────────────────────────
+  // ─── ORBITAL CAMERA FROM DEVICE TILT ─────────────────────────────────────
+  // The camera orbits around the shed centre using spherical coordinates.
+  // Tilt left/right controls azimuth (horizontal orbit).
+  // Tilt front/back controls elevation (vertical orbit).
+  // Drag overrides tilt on desktop.
 
-  let tiltX = 0, tiltY = 0, rawTX = 0, rawTY = 0;
+  const ORBIT_RADIUS   = 5.5;
+  const ORBIT_CENTER_Y = 0.5;
+  const ELEV_MIN = 0.05;   // radians above ground
+  const ELEV_MAX = 1.1;    // radians — don't go over the top
+
+  // Current spherical coords
+  let orbitAz   = 0.4;   // azimuth (horizontal angle around Y axis)
+  let orbitElev = 0.22;  // elevation angle from horizontal
+
+  // Smoothed targets
+  let targetAz   = orbitAz;
+  let targetElev = orbitElev;
+
+  // Tilt calibration
   let baseGamma = null, baseBeta = null, calibBuf = [], gotMotion = false;
+
+  // Total accumulated tilt offset (so it feels like panning, not springing back)
+  let tiltAzOffset   = 0;
+  let tiltElevOffset = 0;
+  let lastGamma = null, lastBeta = null;
 
   function handleOrientation(e) {
     const gamma = e.gamma, beta = e.beta;
     if (gamma === null || beta === null) return;
+
+    // Calibrate baseline
     if (baseGamma === null) {
       calibBuf.push({ gamma, beta });
       if (calibBuf.length < 8) return;
       baseGamma = calibBuf.reduce((s,r) => s + r.gamma, 0) / calibBuf.length;
       baseBeta  = calibBuf.reduce((s,r) => s + r.beta,  0) / calibBuf.length;
+      lastGamma = baseGamma;
+      lastBeta  = baseBeta;
       calibBuf  = [];
+      gotMotion = true;
+      return;
     }
-    rawTX += (Math.max(-1, Math.min(1, (gamma - baseGamma) / 40)) - rawTX) * 0.12;
-    rawTY += (Math.max(-1, Math.min(1, (beta  - baseBeta)  / 40)) - rawTY) * 0.12;
+
+    // Use delta from last frame so movement is cumulative (orbits, not springs back)
+    const dGamma = gamma - lastGamma;
+    const dBeta  = beta  - lastBeta;
+    lastGamma = gamma;
+    lastBeta  = beta;
+
+    // Clamp per-frame deltas to avoid jumps from sensor glitches
+    const clamp = (v, l) => Math.max(-l, Math.min(l, v));
+
+    tiltAzOffset   += clamp(dGamma, 3) * 0.022;
+    tiltElevOffset -= clamp(dBeta,  3) * 0.018;
+
+    targetAz   = 0.4 + tiltAzOffset;
+    targetElev = Math.max(ELEV_MIN, Math.min(ELEV_MAX, 0.22 + tiltElevOffset));
     gotMotion = true;
   }
 
@@ -576,10 +608,22 @@
   window.addEventListener('deviceorientationabsolute', e => { gotAbs = true; handleOrientation(e); }, { passive: true });
   setTimeout(() => { if (!gotAbs) window.addEventListener('deviceorientation', handleOrientation, { passive: true }); }, 600);
 
+  // Double-tap recentres the orbit
+  let lastTap2 = 0;
+  window.addEventListener('touchend', () => {
+    const now = Date.now();
+    if (now - lastTap2 < 300) {
+      tiltAzOffset = 0; tiltElevOffset = 0;
+      targetAz = 0.4; targetElev = 0.22;
+    }
+    lastTap2 = now;
+  }, { passive: true });
+
+  // Mouse parallax for desktop (also orbits)
   window.addEventListener('mousemove', e => {
     if (gotMotion) return;
-    rawTX += ((e.clientX / window.innerWidth  - 0.5) * 2 - rawTX) * 0.08;
-    rawTY += ((e.clientY / window.innerHeight - 0.5) * 2 - rawTY) * 0.08;
+    targetAz   = 0.4 + (e.clientX / window.innerWidth  - 0.5) * 2.5;
+    targetElev = Math.max(ELEV_MIN, Math.min(ELEV_MAX, 0.22 + (e.clientY / window.innerHeight - 0.5) * -0.8));
   });
 
   // ─── MAIN LOOP ────────────────────────────────────────────────────────────
@@ -587,20 +631,30 @@
   function loop() {
     requestAnimationFrame(loop);
 
-    // Smooth tilt for background
-    tiltX += (rawTX - tiltX) * 0.04;
-    tiltY += (rawTY - tiltY) * 0.04;
+    // Smooth orbit angles toward targets
+    orbitAz   += (targetAz   - orbitAz)   * 0.05;
+    orbitElev += (targetElev - orbitElev) * 0.05;
 
-    // Subtle camera sway from tilt (separate from drag rotation)
-    camera.position.x = tiltX * 0.4;
-    camera.position.y = 1.2 - tiltY * 0.3;
-    camera.lookAt(0, 0.5, 0);
+    // Convert spherical → cartesian for camera position
+    // When drag is active, drag controls shed rotation instead of camera orbit
+    let camAz = orbitAz;
+    if (!gotMotion) {
+      // On desktop without motion, drag rotates shed as before
+      // but we also do the orbital mouse effect above
+      camAz = orbitAz;
+    }
 
-    // Shed rotation — inertia + slow auto-spin
+    camera.position.x = Math.sin(camAz) * Math.cos(orbitElev) * ORBIT_RADIUS;
+    camera.position.y = ORBIT_CENTER_Y + Math.sin(orbitElev) * ORBIT_RADIUS;
+    camera.position.z = Math.cos(camAz) * Math.cos(orbitElev) * ORBIT_RADIUS;
+    camera.lookAt(0, ORBIT_CENTER_Y, 0);
+
+    // Shed still has its own drag rotation on top
     if (!isDragging) {
       velY *= 0.97;
       velX *= 0.97;
-      if (Math.abs(velY) < 0.0005) velY = 0.003; // resume slow spin
+      // Only auto-spin if motion is not active (on mobile, tilt does the orbiting)
+      if (!gotMotion && Math.abs(velY) < 0.0005) velY = 0.003;
     }
     rotY += velY;
     rotX += velX;
